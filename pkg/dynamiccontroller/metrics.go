@@ -27,6 +27,7 @@ func init() {
 		requeueTotal,
 		reconcileDuration,
 		gvrCount,
+		informerCount,
 		queueLength,
 		handlerErrorsTotal,
 		informerSyncDuration,
@@ -64,6 +65,12 @@ var (
 		prometheus.GaugeOpts{
 			Name: "dynamic_controller_gvr_count",
 			Help: "Number of GVRs currently managed by the controller",
+		},
+	)
+	informerCount = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dynamic_controller_informer_count",
+			Help: "Number of informers currently running in the controller",
 		},
 	)
 	queueLength = prometheus.NewGauge(

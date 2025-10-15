@@ -452,6 +452,44 @@ func (dc *DynamicController) enqueueObject(obj interface{}, eventType string) {
 // Register registers a new GVK to the informers map safely.
 func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersionResource, handler Handler) error {
 	dc.log.V(1).Info("Registering new GVK", "gvr", gvr)
+	// Even thought the informer is already registered, we should still
+	// update the handler, as it might have changed.
+	_, loaded := dc.handlers.Swap(gvr, handler)
+	if !loaded {
+		// the resource did not have a registered handler before
+		// hence there was no handler registered for this kind
+		// we should increase the counter
+		gvrCount.Inc()
+	}
+	err := dc.startGVKInformer(ctx, gvr)
+	if err != nil {
+		return err
+	}
+	dc.log.V(1).Info("Successfully registered GVK", "gvr", gvr)
+	return nil
+}
+
+// Deregister safely removes a GVK from the controller and cleans up associated resources.
+func (dc *DynamicController) Deregister(ctx context.Context, gvr schema.GroupVersionResource) error {
+	dc.log.Info("Unregistering GVK", "gvr", gvr)
+	// Unregister the handler if any
+	_, loaded := dc.handlers.LoadAndDelete(gvr)
+	if loaded {
+		// the resource actually had a registered handler.
+		// it does not any longer, so we should decrement the count.
+		gvrCount.Dec()
+	}
+	err := dc.stopGVKInformer(ctx, gvr)
+	if err != nil {
+		return err
+	}
+	dc.log.V(1).Info("Successfully unregistered GVK", "gvr", gvr)
+	return nil
+}
+
+// Register registers a new GVK to the informers map safely.
+func (dc *DynamicController) startGVKInformer(ctx context.Context, gvr schema.GroupVersionResource) error {
+	dc.log.V(1).Info("Starting GVK informer", "gvr", gvr)
 
 	// Create a new informer without starting it.
 	// If there was no informer we will start it later
@@ -472,9 +510,6 @@ func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersi
 		shutdown: cancel,
 	})
 	if loaded {
-		// Even thought the informer is already registered, we should still
-		// update the handler, as it might have changed.
-		dc.handlers.Store(gvr, handler)
 		// trigger reconciliation of the corresponding gvr's
 		objs, err := dc.kubeClient.Resource(gvr).Namespace("").List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -509,7 +544,6 @@ func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersi
 		dc.log.Error(err, "Failed to set watch error handler", "gvr", gvr)
 		return fmt.Errorf("failed to set watch error handler for GVR %s: %w", gvr, err)
 	}
-	dc.handlers.Store(gvr, handler)
 
 	// Start the informer
 	go func() {
@@ -527,22 +561,22 @@ func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersi
 
 	if !synced {
 		cancel()
-		return fmt.Errorf("failed to sync informer cache for GVR %s", gvr)
+		return fmt.Errorf("failed to sync informer cache for GVR %s: %w", gvr, err)
 	}
 
-	gvrCount.Inc()
-	dc.log.V(1).Info("Successfully registered GVK", "gvr", gvr)
+	informerCount.Inc()
+	dc.log.V(1).Info("Successfully started GVK informer", "gvr", gvr)
 	return nil
 }
 
 // Deregister safely removes a GVK from the controller and cleans up associated resources.
-func (dc *DynamicController) Deregister(ctx context.Context, gvr schema.GroupVersionResource) error {
-	dc.log.Info("Unregistering GVK", "gvr", gvr)
+func (dc *DynamicController) stopGVKInformer(ctx context.Context, gvr schema.GroupVersionResource) error {
+	dc.log.Info("Stopping GVK informer", "gvr", gvr)
 
 	// Retrieve the informer
 	informerObj, ok := dc.informers.LoadAndDelete(gvr)
 	if !ok {
-		dc.log.V(1).Info("GVK not registered, nothing to deregister", "gvr", gvr)
+		dc.log.V(1).Info("GVK informer not registered, nothing to stop", "gvr", gvr)
 		return nil
 	}
 
@@ -559,19 +593,13 @@ func (dc *DynamicController) Deregister(ctx context.Context, gvr schema.GroupVer
 	// Wait for the informer to shut down
 	wrapper.informer.Shutdown()
 
-	// Remove the informer from the map
-	dc.informers.Delete(gvr)
-
-	// Unregister the handler if any
-	dc.handlers.Delete(gvr)
-
-	gvrCount.Dec()
+	informerCount.Dec()
 	// Clean up any pending items in the queue for this GVR
 	// NOTE(a-hilaly): This is a bit heavy.. maybe we can find a better way to do this.
 	// Thinking that we might want to have a queue per GVR.
 	// dc.cleanupQueue(gvr)
 	// time.Sleep(1 * time.Second)
 	// isStopped := wrapper.informer.ForResource(gvr).Informer().IsStopped()
-	dc.log.V(1).Info("Successfully unregistered GVK", "gvr", gvr)
+	dc.log.V(1).Info("Successfully stopped GVK informer", "gvr", gvr)
 	return nil
 }
