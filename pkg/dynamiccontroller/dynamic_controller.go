@@ -309,7 +309,7 @@ func (dc *DynamicController) processNextWorkItem(ctx context.Context) bool {
 // syncFunc reconciles a single item.
 func (dc *DynamicController) syncFunc(ctx context.Context, oi ObjectIdentifiers) error {
 	gvrKey := fmt.Sprintf("%s/%s/%s", oi.GVR.Group, oi.GVR.Version, oi.GVR.Resource)
-	dc.log.V(1).Info("Syncing object", "gvr", gvrKey, "namespacedKey", oi.NamespacedKey)
+	dc.log.V(1).Info("Syncing object", "gvr", gvrKey, "namespacedKey", oi.NamespacedName)
 
 	startTime := time.Now()
 	defer func() {
@@ -318,7 +318,7 @@ func (dc *DynamicController) syncFunc(ctx context.Context, oi ObjectIdentifiers)
 		reconcileTotal.WithLabelValues(gvrKey).Inc()
 		dc.log.V(1).Info("Finished syncing object",
 			"gvr", gvrKey,
-			"namespacedKey", oi.NamespacedKey,
+			"namespacedKey", oi.NamespacedName,
 			"duration", duration)
 	}()
 
@@ -335,14 +335,7 @@ func (dc *DynamicController) syncFunc(ctx context.Context, oi ObjectIdentifiers)
 		return fmt.Errorf("invalid handler type for GVR: %s", gvrKey)
 	}
 
-	nn := types.NamespacedName{}
-	if parts := strings.Split(oi.NamespacedKey, "/"); len(parts) == 1 {
-		nn.Name = parts[0]
-	} else {
-		nn.Namespace = parts[0]
-		nn.Name = parts[1]
-	}
-	err := handlerFunc(ctx, ctrl.Request{NamespacedName: nn})
+	err := handlerFunc(ctx, ctrl.Request{NamespacedName: oi.NamespacedName})
 	if err != nil {
 		handlerErrorsTotal.WithLabelValues(gvrKey).Inc()
 	}
@@ -388,10 +381,9 @@ func (dc *DynamicController) shutdown(ctx context.Context) error {
 // Since we are handling all the resources using the same handlerFunc, we need to know
 // what GVR we're dealing with - so that we can use the appropriate workflow operator.
 type ObjectIdentifiers struct {
-	// NamespacedKey is the namespaced key of the object. Typically in the format
-	// `namespace/name`.
-	NamespacedKey string
-	GVR           schema.GroupVersionResource
+	// NamespacedName is the namespaced key of the object.
+	NamespacedName types.NamespacedName
+	GVR            schema.GroupVersionResource
 }
 
 // updateFunc is the update event handler for the GVR informers
@@ -437,8 +429,8 @@ func (dc *DynamicController) enqueueObject(obj interface{}, eventType string) {
 	gvr := metadata.GVKtoGVR(gvk)
 
 	objectIdentifiers := ObjectIdentifiers{
-		NamespacedKey: namespacedKey,
-		GVR:           gvr,
+		NamespacedName: parseNamespacedName(namespacedKey),
+		GVR:            gvr,
 	}
 
 	dc.log.V(1).Info("Enqueueing object",
@@ -602,4 +594,15 @@ func (dc *DynamicController) stopGVKInformer(ctx context.Context, gvr schema.Gro
 	// isStopped := wrapper.informer.ForResource(gvr).Informer().IsStopped()
 	dc.log.V(1).Info("Successfully stopped GVK informer", "gvr", gvr)
 	return nil
+}
+
+func parseNamespacedName(namespacedName string) types.NamespacedName {
+	nn := types.NamespacedName{}
+	if parts := strings.Split(namespacedName, string(types.Separator)); len(parts) == 1 {
+		nn.Name = parts[0]
+	} else {
+		nn.Namespace = parts[0]
+		nn.Name = parts[1]
+	}
+	return nn
 }
