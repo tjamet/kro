@@ -453,8 +453,25 @@ func (dc *DynamicController) enqueueObject(obj interface{}, eventType string) {
 func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersionResource, handler Handler) error {
 	dc.log.V(1).Info("Registering new GVK", "gvr", gvr)
 
-	_, exists := dc.informers.Load(gvr)
-	if exists {
+	// Create a new informer without starting it.
+	// If there was no informer we will start it later
+	// otherwise it will be garbage collected
+	gvkInformer := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+		dc.kubeClient,
+		dc.config.ResyncPeriod,
+		// Maybe we can make this configurable in the future. Thinking that
+		// we might want to filter out some resources, by namespace or labels
+		"",
+		nil,
+	)
+	informerContext := context.Background()
+	cancelableContext, cancel := context.WithCancel(informerContext)
+
+	genericInformerWrapper, loaded := dc.informers.LoadOrStore(gvr, &informerWrapper{
+		informer: gvkInformer,
+		shutdown: cancel,
+	})
+	if loaded {
 		// Even thought the informer is already registered, we should still
 		// update the handler, as it might have changed.
 		dc.handlers.Store(gvr, handler)
@@ -469,16 +486,12 @@ func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersi
 		return nil
 	}
 
-	// Create a new informer
-	gvkInformer := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
-		dc.kubeClient,
-		dc.config.ResyncPeriod,
-		// Maybe we can make this configurable in the future. Thinking that
-		// we might want to filter out some resources, by namespace or labels
-		"",
-		nil,
-	)
-	informer := gvkInformer.ForResource(gvr).Informer()
+	informerWrapper, ok := genericInformerWrapper.(*informerWrapper)
+	if !ok {
+		return fmt.Errorf("invalid informer wrapper type for GVR: %s", gvr)
+	}
+
+	informer := informerWrapper.informer.ForResource(gvr).Informer()
 
 	// Set up event handlers
 	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -498,8 +511,6 @@ func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersi
 	}
 	dc.handlers.Store(gvr, handler)
 
-	informerContext := context.Background()
-	cancelableContext, cancel := context.WithCancel(informerContext)
 	// Start the informer
 	go func() {
 		dc.log.V(1).Info("Starting informer", "gvr", gvr)
@@ -519,10 +530,6 @@ func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersi
 		return fmt.Errorf("failed to sync informer cache for GVR %s", gvr)
 	}
 
-	dc.informers.Store(gvr, &informerWrapper{
-		informer: gvkInformer,
-		shutdown: cancel,
-	})
 	gvrCount.Inc()
 	dc.log.V(1).Info("Successfully registered GVK", "gvr", gvr)
 	return nil
@@ -533,7 +540,7 @@ func (dc *DynamicController) Deregister(ctx context.Context, gvr schema.GroupVer
 	dc.log.Info("Unregistering GVK", "gvr", gvr)
 
 	// Retrieve the informer
-	informerObj, ok := dc.informers.Load(gvr)
+	informerObj, ok := dc.informers.LoadAndDelete(gvr)
 	if !ok {
 		dc.log.V(1).Info("GVK not registered, nothing to deregister", "gvr", gvr)
 		return nil
