@@ -14,7 +14,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Build static manifests
+        env:
+          TAG: ${{ github.ref_name}}
+        run: |
+          version="${TAG#v*}"
+          
+          # TODO
+          # (tjamet) we need to have a better way to inject the version into those manifests
+          sed -i '' \
+          -e "s/newTag: .*/newTag: \"${version}\"/" \
+          -e "s/app.kubernetes.io\/version: .*/app.kubernetes.io\/version: \"${version}\"/" \
+           ./config/default/kustomization.yaml \
+           ./config/default/deployment_image_patch.yaml
+          
+          kustomize build ./manifests/core-install > ./kro-core-install-manifests.yaml
+          kustomize build ./manifests/core-install-with-metrics > ./kro-core-install-with-metrics-manifests.yaml
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          files: |
+            kro-core-install-manifests.yaml
+            kro-core-install-with-metrics-manifests.yaml
