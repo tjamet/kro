@@ -26,9 +26,11 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -52,11 +54,16 @@ func setupFakeClient() *fake.FakeDynamicClient {
 	scheme := runtime.NewScheme()
 	gvr := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
 	gvk := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Test"}
+	managedGVR := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "manageds"}
+	managedGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Managed"}
 	obj := &unstructured.Unstructured{}
 	obj.SetGroupVersionKind(gvk)
+	managedObj := &unstructured.Unstructured{}
+	managedObj.SetGroupVersionKind(managedGVK)
 	return fake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
-		gvr: "TestList",
-	}, obj)
+		managedGVR: "ManagedList",
+		gvr:        "TestList",
+	}, obj, managedObj)
 }
 
 func TestNewDynamicController(t *testing.T) {
@@ -140,11 +147,19 @@ func TestRegisterAndUnregisterGVK(t *testing.T) {
 func TestEnqueueObject(t *testing.T) {
 	logger := noopLogger()
 	client := setupFakeClient()
+	gvr := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
 
 	dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
 		MaxRetryDelay: 1000 * time.Second,
 		RateLimit:     10,
 		BurstLimit:    100}, client)
+	dc.reconcileRequestMappers = map[schema.GroupVersionResource]map[schema.GroupVersionResource]func(obj *unstructured.Unstructured) (types.NamespacedName, bool){
+		gvr: {
+			gvr: func(obj *unstructured.Unstructured) (types.NamespacedName, bool) {
+				return types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, true
+			},
+		},
+	}
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-object")
@@ -154,6 +169,60 @@ func TestEnqueueObject(t *testing.T) {
 	dc.enqueueObject(obj, "add")
 
 	assert.Equal(t, 1, dc.queue.Len())
+}
+
+func TestEnqueueObjectOwnerReconciler(t *testing.T) {
+	logger := noopLogger()
+	client := setupFakeClient()
+
+	managedGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Managed"}
+	reconciledGVR := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
+	reconciledGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Test"}
+	t.Run("When the managed object is not owned by the reconciled object, it is not enqueued", func(t *testing.T) {
+
+		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
+			MaxRetryDelay: 1000 * time.Second,
+			RateLimit:     10,
+			BurstLimit:    100}, client)
+
+		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
+
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(managedGVK)
+		obj.SetNamespace("test-namespace")
+		obj.SetName("test-object-2")
+
+		dc.enqueueObject(obj, "add")
+
+		assert.Equal(t, 0, dc.queue.Len())
+	})
+
+	t.Run("When the managed object is  owned by the reconciled object, it is enqueued", func(t *testing.T) {
+
+		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
+			MaxRetryDelay: 1000 * time.Second,
+			RateLimit:     10,
+			BurstLimit:    100}, client)
+
+		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
+		obj := &unstructured.Unstructured{}
+		obj.SetGroupVersionKind(managedGVK)
+		obj.SetNamespace("test-namespace")
+		obj.SetName("test-object-2")
+
+		obj.SetOwnerReferences([]metav1.OwnerReference{
+			{
+				APIVersion: reconciledGVK.Group,
+				Kind:       reconciledGVK.Kind,
+				Name:       "reconciled-name",
+			},
+		})
+
+		dc.enqueueObject(obj, "add")
+
+		assert.Equal(t, 1, dc.queue.Len())
+	})
+
 }
 
 func TestInstanceUpdatePolicy(t *testing.T) {
