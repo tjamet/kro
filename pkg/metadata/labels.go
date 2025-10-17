@@ -66,6 +66,25 @@ func HasMatchingKROOwner(a, b metav1.ObjectMeta) bool {
 	return aOwnerName == bOwnerName && aOwnerID == bOwnerID
 }
 
+func GetKROOwner(meta metav1.Object) (string, string, bool) {
+	v, ok := meta.GetLabels()[OwnedLabel]
+	if !ok {
+		return "", "", false
+	}
+	if v != stringFromBoolean(true) {
+		return "", "", false
+	}
+	namespace, ok := meta.GetLabels()[InstanceNamespaceLabel]
+	if !ok {
+		return "", "", false
+	}
+	name, ok := meta.GetLabels()[InstanceLabel]
+	if !ok {
+		return "", "", false
+	}
+	return namespace, name, true
+}
+
 // SetKROOwned sets the OwnedLabel to true on the resource.
 func SetKROOwned(meta metav1.ObjectMeta) {
 	setLabel(&meta, OwnedLabel, stringFromBoolean(true))

@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic/fake"
 	controllerruntime "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -123,14 +122,14 @@ func TestRegisterAndUnregisterGVK(t *testing.T) {
 	})
 
 	// Register GVK
-	err := dc.Register(context.Background(), gvr, handlerFunc)
+	err := dc.Register(context.Background(), For(gvr), handlerFunc)
 	require.NoError(t, err)
 
 	_, exists := dc.informers.Load(gvr)
 	assert.True(t, exists)
 
 	// Try to register again (should not fail)
-	err = dc.Register(context.Background(), gvr, handlerFunc)
+	err = dc.Register(context.Background(), For(gvr), handlerFunc)
 	assert.NoError(t, err)
 
 	// Unregister GVK
@@ -146,19 +145,11 @@ func TestRegisterAndUnregisterGVK(t *testing.T) {
 func TestEnqueueObject(t *testing.T) {
 	logger := noopLogger()
 	client := setupFakeClient()
-	gvr := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
 
 	dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
 		MaxRetryDelay: 1000 * time.Second,
 		RateLimit:     10,
 		BurstLimit:    100}, client)
-	dc.reconcileRequestMappers = map[schema.GroupVersionResource]map[schema.GroupVersionResource]func(obj *unstructured.Unstructured) (types.NamespacedName, bool){
-		gvr: {
-			gvr: func(obj *unstructured.Unstructured) (types.NamespacedName, bool) {
-				return types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, true
-			},
-		},
-	}
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-object")
@@ -169,60 +160,6 @@ func TestEnqueueObject(t *testing.T) {
 
 	assert.Equal(t, 1, dc.queue.Len())
 }
-
-// func TestEnqueueObjectOwnerReconciler(t *testing.T) {
-// 	logger := noopLogger()
-// 	client := setupFakeClient()
-
-// 	managedGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Managed"}
-// 	reconciledGVR := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
-// 	reconciledGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Test"}
-// 	t.Run("When the managed object is not owned by the reconciled object, it is not enqueued", func(t *testing.T) {
-
-// 		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
-// 			MaxRetryDelay: 1000 * time.Second,
-// 			RateLimit:     10,
-// 			BurstLimit:    100}, client)
-
-// 		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
-
-// 		obj := &unstructured.Unstructured{}
-// 		obj.SetGroupVersionKind(managedGVK)
-// 		obj.SetNamespace("test-namespace")
-// 		obj.SetName("test-object-2")
-
-// 		dc.enqueueObject(obj, "add")
-
-// 		assert.Equal(t, 0, dc.queue.Len())
-// 	})
-
-// 	t.Run("When the managed object is  owned by the reconciled object, it is enqueued", func(t *testing.T) {
-
-// 		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
-// 			MaxRetryDelay: 1000 * time.Second,
-// 			RateLimit:     10,
-// 			BurstLimit:    100}, client)
-
-// 		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
-// 		obj := &unstructured.Unstructured{}
-// 		obj.SetGroupVersionKind(managedGVK)
-// 		obj.SetNamespace("test-namespace")
-// 		obj.SetName("test-object-2")
-
-// 		obj.SetOwnerReferences([]metav1.OwnerReference{
-// 			{
-// 				APIVersion: reconciledGVK.Group,
-// 				Kind:       reconciledGVK.Kind,
-// 				Name:       "reconciled-name",
-// 			},
-// 		})
-
-// 		dc.enqueueObject(obj, "add")
-
-// 		assert.Equal(t, 1, dc.queue.Len())
-// 	})
-
-// }
 
 func TestInstanceUpdatePolicy(t *testing.T) {
 	logger := noopLogger()
@@ -257,7 +194,7 @@ func TestInstanceUpdatePolicy(t *testing.T) {
 	})
 
 	// simulate initial creation of the resource graph
-	err := dc.Register(context.Background(), gvr, handlerFunc)
+	err := dc.Register(context.Background(), For(gvr), handlerFunc)
 	assert.NoError(t, err)
 
 	// simulate reconciling the instances
@@ -268,11 +205,11 @@ func TestInstanceUpdatePolicy(t *testing.T) {
 	}
 
 	// simulate updating the resource graph
-	err = dc.Register(context.Background(), gvr, handlerFunc)
+	err = dc.Register(context.Background(), For(gvr), handlerFunc)
 	assert.NoError(t, err)
 
 	// check if the expected objects are queued
-	assert.Equal(t, dc.queue.Len(), 2)
+	assert.Equal(t, 2, dc.queue.Len())
 	for dc.queue.Len() > 0 {
 		name, _ := dc.queue.Get()
 		_, ok := objs[name.NamespacedName.String()]

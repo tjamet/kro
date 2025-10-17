@@ -72,7 +72,6 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -128,12 +127,6 @@ type DynamicController struct {
 	// handler is responsible for managing a specific GVR.
 	handlers typedSyncMap[schema.GroupVersionResource, Handler]
 
-	// access is the mutex to access the resolvers map
-	access sync.Mutex
-	// reconcileRequestMappers is a map of managed GVR to reconciler GVR to resolver function
-	// the managed GVR is stored first to allow more efficient lookup in the informer
-	reconcileRequestMappers map[schema.GroupVersionResource]map[schema.GroupVersionResource]func(obj *unstructured.Unstructured) (types.NamespacedName, bool)
-
 	// queue is the workqueue used to process items
 	queue workqueue.TypedRateLimitingInterface[ObjectIdentifiers]
 
@@ -141,78 +134,6 @@ type DynamicController struct {
 }
 
 type Handler func(ctx context.Context, req ctrl.Request) error
-
-type ReconciledInstanceFinder func(obj *unstructured.Unstructured) (types.NamespacedName, bool)
-
-type ReconciledInstanceFinderBuilder interface {
-	// WatchedResource returns the resource that needs to be watched
-	WatchedResource() schema.GroupVersionResource
-	NewFinder(reconciledResource schema.GroupVersionResource) ReconciledInstanceFinder
-}
-
-type informerWrapper struct {
-	informer dynamicinformer.DynamicSharedInformerFactory
-	shutdown func()
-}
-
-type selfInstanceFinder struct {
-	log              logr.Logger
-	instanceResource schema.GroupVersionResource
-}
-
-func (r *selfInstanceFinder) WatchedResource() schema.GroupVersionResource {
-	return r.instanceResource
-}
-func (r *selfInstanceFinder) NewFinder(reconciledResource schema.GroupVersionResource) ReconciledInstanceFinder {
-	return func(obj *unstructured.Unstructured) (types.NamespacedName, bool) {
-		namespacedKey, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-		if err != nil {
-			r.log.Error(err, "Failed to get key for object")
-			return types.NamespacedName{}, false
-		}
-		return parseNamespacedName(namespacedKey), true
-	}
-}
-
-type ownerInstanceFinder struct {
-	watchedResource schema.GroupVersionResource
-}
-
-func (r *ownerInstanceFinder) WatchedResource() schema.GroupVersionResource {
-	return r.watchedResource
-}
-
-func (r *ownerInstanceFinder) NewFinder(reconciledResource schema.GroupVersionResource) ReconciledInstanceFinder {
-	return func(obj *unstructured.Unstructured) (types.NamespacedName, bool) {
-		ownerReferences := obj.GetOwnerReferences()
-		for _, ownerReference := range ownerReferences {
-			gv, err := schema.ParseGroupVersion(ownerReference.APIVersion)
-			if err != nil {
-				continue
-			}
-			ownerGVK := schema.GroupVersionKind{
-				Group:   gv.Group,
-				Version: gv.Version,
-				Kind:    ownerReference.Kind,
-			}
-			ownerGVR := metadata.GVKtoGVR(ownerGVK)
-			if ownerGVR == reconciledResource {
-				return types.NamespacedName{
-					Namespace: obj.GetNamespace(),
-					Name:      ownerReference.Name,
-				}, true
-			}
-		}
-		return types.NamespacedName{}, false
-	}
-}
-
-func Owns(gvk schema.GroupVersionKind) ReconciledInstanceFinderBuilder {
-	gvr := metadata.GVKtoGVR(gvk)
-	return &ownerInstanceFinder{
-		watchedResource: gvr,
-	}
-}
 
 // NewDynamicController creates a new DynamicController instance.
 func NewDynamicController(
@@ -418,7 +339,7 @@ func (dc *DynamicController) shutdown(ctx context.Context) error {
 		wg.Add(1)
 		go func(informer *informerWrapper) {
 			defer wg.Done()
-			informer.informer.Shutdown()
+			informer.Shutdown()
 		}(informer)
 		return true
 	})
@@ -451,30 +372,6 @@ type ObjectIdentifiers struct {
 	GVR            schema.GroupVersionResource
 }
 
-// updateFunc is the update event handler for the GVR informers
-func (dc *DynamicController) updateFunc(old, new interface{}) {
-	newObj, ok := new.(*unstructured.Unstructured)
-	if !ok {
-		dc.log.Error(nil, "failed to cast new object to unstructured")
-		return
-	}
-	oldObj, ok := old.(*unstructured.Unstructured)
-	if !ok {
-		dc.log.Error(nil, "failed to cast old object to unstructured")
-		return
-	}
-
-	if newObj.GetGeneration() == oldObj.GetGeneration() {
-		dc.log.V(2).Info("Skipping update due to unchanged generation",
-			"name", newObj.GetName(),
-			"namespace", newObj.GetNamespace(),
-			"generation", newObj.GetGeneration())
-		return
-	}
-
-	dc.enqueueObject(new, "update")
-}
-
 // enqueueObject adds an object to the workqueue
 func (dc *DynamicController) enqueueObject(obj interface{}, eventType string) {
 	namespacedKey, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
@@ -493,49 +390,99 @@ func (dc *DynamicController) enqueueObject(obj interface{}, eventType string) {
 	gvk := u.GroupVersionKind()
 	gvr := metadata.GVKtoGVR(gvk)
 
-	for _, identifier := range dc.loadHandlerObjectIdentifiers(gvr) {
-		objectIdentifiers, ok := identifier(u)
-		if ok {
-			dc.queue.Add(objectIdentifiers)
+	dc.enqueue(ObjectIdentifiers{
+		NamespacedName: parseNamespacedName(namespacedKey),
+		GVR:            gvr,
+	})
+}
 
-			dc.log.V(1).Info("Enqueueing object",
-				"objectIdentifiers", objectIdentifiers,
-				"eventType", eventType)
-		}
-	}
+func (dc *DynamicController) enqueue(objectIdentifiers ObjectIdentifiers) {
+	dc.queue.Add(objectIdentifiers)
+	dc.log.V(1).Info("Enqueueing object", "objectIdentifiers", objectIdentifiers)
 }
 
 // Register registers a new GVK to the informers map safely.
-func (dc *DynamicController) Register(ctx context.Context, gvr schema.GroupVersionResource, handler Handler, resolvers ...ReconciledInstanceFinderBuilder) error {
-	dc.log.V(1).Info("Registering new GVK", "gvr", gvr)
+func (dc *DynamicController) Register(ctx context.Context, factory *InformerEventHandlerFactory, handler Handler) error {
+	dc.log.V(1).Info("Registering new GVK", "gvr", factory.gvr)
 	// Even thought the informer is already registered, we should still
 	// update the handler, as it might have changed.
-	_, loaded := dc.handlers.Swap(gvr, handler)
+	_, loaded := dc.handlers.Swap(factory.gvr, handler)
 	if !loaded {
 		// the resource did not have a registered handler before
 		// hence there was no handler registered for this kind
 		// we should increase the counter
 		gvrCount.Inc()
 	}
-	resolvers = append(resolvers, &selfInstanceFinder{
-		log:              dc.log,
-		instanceResource: gvr,
-	})
-	dc.storeHandlerResolvers(gvr, resolvers...)
-	for _, resolver := range resolvers {
-		err := dc.startGVKInformer(ctx, resolver.WatchedResource())
+
+	eventHandlers, err := factory.BuildInformerHandlers(dc.log, dc.enqueue)
+	if err != nil {
+		return err
+	}
+
+	for gvr, eventHandler := range eventHandlers {
+		informerWrapper, err := dc.startGVKInformer(ctx, gvr)
+		if err != nil {
+			return err
+		}
+		err = informerWrapper.SetEventHandler(gvr, eventHandler)
 		if err != nil {
 			return err
 		}
 	}
 
-	dc.log.V(1).Info("Successfully registered GVK", "gvr", gvr)
+	informersToShutdown := []schema.GroupVersionResource{}
+	dc.informers.Range(func(gvr schema.GroupVersionResource, informerWrapper *informerWrapper) bool {
+		// The main resource was already renewed above.
+		// We need to focus on the other resources
+		if gvr == factory.gvr {
+			return true
+		}
+		err := informerWrapper.RemoveEventHandler(factory.gvr)
+		if err != nil {
+			dc.log.Error(err, "Failed to remove event handler", "gvr", factory.gvr)
+		}
+		if informerWrapper.ShouldShutdown() {
+			informersToShutdown = append(informersToShutdown, gvr)
+		}
+		return true
+	})
+
+	for _, gvr := range informersToShutdown {
+		err := dc.stopGVKInformer(ctx, gvr)
+		if err != nil {
+			dc.log.Error(err, "Failed to stop informer", "gvr", gvr)
+		}
+	}
+
+	dc.log.V(1).Info("Successfully registered GVK", "gvr", factory.gvr)
 	return nil
 }
 
 // Deregister safely removes a GVK from the controller and cleans up associated resources.
 func (dc *DynamicController) Deregister(ctx context.Context, gvr schema.GroupVersionResource) error {
 	dc.log.Info("Unregistering GVK", "gvr", gvr)
+
+	// Deregister all informers associated with the current GVR
+	informersToShutdown := []schema.GroupVersionResource{}
+	dc.informers.Range(func(gvr schema.GroupVersionResource, informerWrapper *informerWrapper) bool {
+
+		err := informerWrapper.RemoveEventHandler(gvr)
+		if err != nil {
+			dc.log.Error(err, "Failed to remove event handler", "gvr", gvr)
+		}
+		if informerWrapper.ShouldShutdown() {
+			informersToShutdown = append(informersToShutdown, gvr)
+		}
+		return true
+	})
+
+	for _, gvr := range informersToShutdown {
+		err := dc.stopGVKInformer(ctx, gvr)
+		if err != nil {
+			dc.log.Error(err, "Failed to stop informer", "gvr", gvr)
+		}
+	}
+
 	// Unregister the handler if any
 	_, loaded := dc.handlers.LoadAndDelete(gvr)
 	if loaded {
@@ -543,71 +490,9 @@ func (dc *DynamicController) Deregister(ctx context.Context, gvr schema.GroupVer
 		// it does not any longer, so we should decrement the count.
 		gvrCount.Dec()
 	}
-	// the resolvers map is used to store a reference of all the objects
-	// that needs to have informormers.
-	// Ensure there is no concurrent edit while stopping unnecessary informers.
-	dc.access.Lock()
-	defer dc.access.Unlock()
-	for informerResource, reconcileRequestMapper := range dc.reconcileRequestMappers {
-		if reconcileRequestMapper != nil {
-			delete(reconcileRequestMapper, gvr)
-		}
-		// it there is nothing else that needs to be reconciled for this resource,
-		// (i.e. no more RGD or managed object)
-		// we should stop the informer.
-		if len(reconcileRequestMapper) == 0 {
-			dc.log.V(1).Info("Stopping unnecessary informer", "gvr", informerResource)
-			err := dc.stopGVKInformer(ctx, informerResource)
-			if err != nil {
-				dc.log.Error(err, "Failed to stop unnecessary informer", "gvr", informerResource)
-				return err
-			}
-		}
-	}
+
 	dc.log.V(1).Info("Successfully unregistered GVK", "gvr", gvr)
 	return nil
-}
-
-func (dc *DynamicController) storeHandlerResolvers(reconciledResource schema.GroupVersionResource, reconcileRequestMappers ...ReconciledInstanceFinderBuilder) {
-	dc.access.Lock()
-	defer dc.access.Unlock()
-	// replace all existing handlers with the new ones
-	for _, resolvers := range dc.reconcileRequestMappers {
-		delete(resolvers, reconciledResource)
-	}
-	if dc.reconcileRequestMappers == nil {
-		dc.reconcileRequestMappers = make(map[schema.GroupVersionResource]map[schema.GroupVersionResource]func(obj *unstructured.Unstructured) (types.NamespacedName, bool))
-	}
-	for _, reconcilerResolver := range reconcileRequestMappers {
-		_, ok := dc.reconcileRequestMappers[reconcilerResolver.WatchedResource()]
-		if !ok {
-			resolvers := make(map[schema.GroupVersionResource]func(obj *unstructured.Unstructured) (types.NamespacedName, bool))
-			dc.reconcileRequestMappers[reconcilerResolver.WatchedResource()] = resolvers
-		}
-		dc.reconcileRequestMappers[reconcilerResolver.WatchedResource()][reconciledResource] = reconcilerResolver.NewFinder(reconciledResource)
-	}
-}
-
-type identifier func(obj *unstructured.Unstructured) (ObjectIdentifiers, bool)
-
-func (dc *DynamicController) loadHandlerObjectIdentifiers(managedResource schema.GroupVersionResource) []identifier {
-	dc.access.Lock()
-	defer dc.access.Unlock()
-	resolvers := make([]identifier, len(dc.reconcileRequestMappers[managedResource]))
-	// make a copy of the resolver map to reduce the lock time
-	// and avoid long locks shall enqueing the object take a while.
-	i := 0
-	for reconciledResource, mapper := range dc.reconcileRequestMappers[managedResource] {
-		resolvers[i] = func(obj *unstructured.Unstructured) (ObjectIdentifiers, bool) {
-			namespacedName, ok := mapper(obj)
-			return ObjectIdentifiers{
-				NamespacedName: namespacedName,
-				GVR:            reconciledResource,
-			}, ok
-		}
-		i++
-	}
-	return resolvers
 }
 
 func parseNamespacedName(namespacedName string) types.NamespacedName {

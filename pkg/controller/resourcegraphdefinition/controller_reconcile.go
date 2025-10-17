@@ -163,7 +163,7 @@ func (r *ResourceGraphDefinitionReconciler) reconcileResourceGraphDefinitionCRD(
 
 // reconcileResourceGraphDefinitionMicroController starts the microcontroller for handling the resources
 func (r *ResourceGraphDefinitionReconciler) reconcileResourceGraphDefinitionMicroController(ctx context.Context, gvr *schema.GroupVersionResource, handler dynamiccontroller.Handler) error {
-	err := r.dynamicController.Register(ctx, *gvr, handler)
+	err := r.dynamicController.Register(ctx, dynamiccontroller.For(*gvr), handler)
 	if err != nil {
 		return newMicroControllerError(err)
 	}
