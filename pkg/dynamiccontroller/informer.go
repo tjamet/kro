@@ -29,7 +29,7 @@ func (dc *DynamicController) startGVKInformer(ctx context.Context, gvr schema.Gr
 	informerContext := context.Background()
 	cancelableContext, cancel := context.WithCancel(informerContext)
 
-	genericInformerWrapper, loaded := dc.informers.LoadOrStore(gvr, &informerWrapper{
+	informerWrapper, loaded := dc.informers.LoadOrStore(gvr, &informerWrapper{
 		informer: gvkInformer,
 		shutdown: cancel,
 	})
@@ -43,11 +43,6 @@ func (dc *DynamicController) startGVKInformer(ctx context.Context, gvr schema.Gr
 			dc.enqueueObject(&obj, "update")
 		}
 		return nil
-	}
-
-	informerWrapper, ok := genericInformerWrapper.(*informerWrapper)
-	if !ok {
-		return fmt.Errorf("invalid informer wrapper type for GVR: %s", gvr)
 	}
 
 	informer := informerWrapper.informer.ForResource(gvr).Informer()
@@ -98,15 +93,10 @@ func (dc *DynamicController) stopGVKInformer(ctx context.Context, gvr schema.Gro
 	dc.log.Info("Stopping GVK informer", "gvr", gvr)
 
 	// Retrieve the informer
-	informerObj, ok := dc.informers.LoadAndDelete(gvr)
+	wrapper, ok := dc.informers.LoadAndDelete(gvr)
 	if !ok {
 		dc.log.V(1).Info("GVK informer not registered, nothing to stop", "gvr", gvr)
 		return nil
-	}
-
-	wrapper, ok := informerObj.(*informerWrapper)
-	if !ok {
-		return fmt.Errorf("invalid informer type for GVR: %s", gvr)
 	}
 
 	// Stop the informer

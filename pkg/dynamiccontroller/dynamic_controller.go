@@ -122,11 +122,11 @@ type DynamicController struct {
 	kubeClient dynamic.Interface
 	// informers is a safe map of GVR to informers. Each informer is responsible
 	// for watching a specific GVR.
-	informers sync.Map
+	informers typedSyncMap[schema.GroupVersionResource, *informerWrapper]
 
 	// handlers is a safe map of GVR to workflow operators. Each
 	// handler is responsible for managing a specific GVR.
-	handlers sync.Map
+	handlers typedSyncMap[schema.GroupVersionResource, Handler]
 
 	// access is the mutex to access the resolvers map
 	access sync.Mutex
@@ -244,10 +244,10 @@ func (dc *DynamicController) AllInformerHaveSynced() bool {
 	// Unfortunately we can't know the number of informers in advance, so we need to
 	// iterate over all of them to check if they have synced.
 
-	dc.informers.Range(func(key, value interface{}) bool {
+	dc.informers.Range(func(key schema.GroupVersionResource, wrapper *informerWrapper) bool {
 		informerCount++
 		// possibly panic if the value is not a SharedIndexInformer
-		informer, ok := value.(cache.SharedIndexInformer)
+		informer, ok := wrapper.informer.(cache.SharedIndexInformer)
 		if !ok {
 			dc.log.Error(nil, "Failed to cast informer", "key", key)
 			allSynced = false
@@ -394,17 +394,11 @@ func (dc *DynamicController) syncFunc(ctx context.Context, oi ObjectIdentifiers)
 			"duration", duration)
 	}()
 
-	genericHandler, ok := dc.handlers.Load(oi.GVR)
+	handlerFunc, ok := dc.handlers.Load(oi.GVR)
 	if !ok {
 		// NOTE(a-hilaly): this might mean that the GVR is not registered, or the workflow operator
 		// is not found. We should probably handle this in a better way.
 		return fmt.Errorf("no handler found for GVR: %s", gvrKey)
-	}
-
-	// this is worth a panic if it fails...
-	handlerFunc, ok := genericHandler.(Handler)
-	if !ok {
-		return fmt.Errorf("invalid handler type for GVR: %s", gvrKey)
 	}
 
 	err := handlerFunc(ctx, ctrl.Request{NamespacedName: oi.NamespacedName})
@@ -419,14 +413,13 @@ func (dc *DynamicController) shutdown(ctx context.Context) error {
 	dc.log.Info("Starting graceful shutdown")
 
 	var wg sync.WaitGroup
-	dc.informers.Range(func(key, value interface{}) bool {
-		k := key.(schema.GroupVersionResource)
-		dc.log.V(1).Info("Shutting down informer", "gvr", k.String())
+	dc.informers.Range(func(key schema.GroupVersionResource, informer *informerWrapper) bool {
+		dc.log.V(1).Info("Shutting down informer", "gvr", key.String())
 		wg.Add(1)
 		go func(informer *informerWrapper) {
 			defer wg.Done()
 			informer.informer.Shutdown()
-		}(value.(*informerWrapper))
+		}(informer)
 		return true
 	})
 

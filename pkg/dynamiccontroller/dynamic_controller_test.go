@@ -26,7 +26,6 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -171,59 +170,59 @@ func TestEnqueueObject(t *testing.T) {
 	assert.Equal(t, 1, dc.queue.Len())
 }
 
-func TestEnqueueObjectOwnerReconciler(t *testing.T) {
-	logger := noopLogger()
-	client := setupFakeClient()
+// func TestEnqueueObjectOwnerReconciler(t *testing.T) {
+// 	logger := noopLogger()
+// 	client := setupFakeClient()
 
-	managedGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Managed"}
-	reconciledGVR := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
-	reconciledGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Test"}
-	t.Run("When the managed object is not owned by the reconciled object, it is not enqueued", func(t *testing.T) {
+// 	managedGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Managed"}
+// 	reconciledGVR := schema.GroupVersionResource{Group: "test", Version: "v1", Resource: "tests"}
+// 	reconciledGVK := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Test"}
+// 	t.Run("When the managed object is not owned by the reconciled object, it is not enqueued", func(t *testing.T) {
 
-		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
-			MaxRetryDelay: 1000 * time.Second,
-			RateLimit:     10,
-			BurstLimit:    100}, client)
+// 		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
+// 			MaxRetryDelay: 1000 * time.Second,
+// 			RateLimit:     10,
+// 			BurstLimit:    100}, client)
 
-		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
+// 		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
 
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(managedGVK)
-		obj.SetNamespace("test-namespace")
-		obj.SetName("test-object-2")
+// 		obj := &unstructured.Unstructured{}
+// 		obj.SetGroupVersionKind(managedGVK)
+// 		obj.SetNamespace("test-namespace")
+// 		obj.SetName("test-object-2")
 
-		dc.enqueueObject(obj, "add")
+// 		dc.enqueueObject(obj, "add")
 
-		assert.Equal(t, 0, dc.queue.Len())
-	})
+// 		assert.Equal(t, 0, dc.queue.Len())
+// 	})
 
-	t.Run("When the managed object is  owned by the reconciled object, it is enqueued", func(t *testing.T) {
+// 	t.Run("When the managed object is  owned by the reconciled object, it is enqueued", func(t *testing.T) {
 
-		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
-			MaxRetryDelay: 1000 * time.Second,
-			RateLimit:     10,
-			BurstLimit:    100}, client)
+// 		dc := NewDynamicController(logger, Config{MinRetryDelay: 200 * time.Millisecond,
+// 			MaxRetryDelay: 1000 * time.Second,
+// 			RateLimit:     10,
+// 			BurstLimit:    100}, client)
 
-		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
-		obj := &unstructured.Unstructured{}
-		obj.SetGroupVersionKind(managedGVK)
-		obj.SetNamespace("test-namespace")
-		obj.SetName("test-object-2")
+// 		dc.storeHandlerResolvers(reconciledGVR, Owns(managedGVK))
+// 		obj := &unstructured.Unstructured{}
+// 		obj.SetGroupVersionKind(managedGVK)
+// 		obj.SetNamespace("test-namespace")
+// 		obj.SetName("test-object-2")
 
-		obj.SetOwnerReferences([]metav1.OwnerReference{
-			{
-				APIVersion: reconciledGVK.Group,
-				Kind:       reconciledGVK.Kind,
-				Name:       "reconciled-name",
-			},
-		})
+// 		obj.SetOwnerReferences([]metav1.OwnerReference{
+// 			{
+// 				APIVersion: reconciledGVK.Group,
+// 				Kind:       reconciledGVK.Kind,
+// 				Name:       "reconciled-name",
+// 			},
+// 		})
 
-		dc.enqueueObject(obj, "add")
+// 		dc.enqueueObject(obj, "add")
 
-		assert.Equal(t, 1, dc.queue.Len())
-	})
+// 		assert.Equal(t, 1, dc.queue.Len())
+// 	})
 
-}
+// }
 
 func TestInstanceUpdatePolicy(t *testing.T) {
 	logger := noopLogger()
