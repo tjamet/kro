@@ -286,4 +286,23 @@ func TestHelmAndKustomizeDeploymentsMustBeSimilar(t *testing.T) {
 
 		assertSimilarHelmAndKustomizeObjects(t, helmObjects, kustomizeObjects)
 	})
+
+	t.Run("kustomize kro core install with prometheus should be similar to helm one", func(t *testing.T) {
+		helmObjects := renderHelmDeployment(t,
+			"--set", "rbac.mode=aggregation",
+			"--set", "metrics.service.create=true",
+			"--set", "metrics.serviceMonitor.enabled=true",
+		)
+		kustomizeObjects := renderKustomizeDeployment(t, "./manifests/core-install-with-prometheus")
+
+		assertAllObjectsAreManagedBy(t, helmObjects, "Helm")
+		assertAllObjectsAreManagedBy(t, kustomizeObjects, "kustomize")
+
+		// version is injected by Chart.yaml.
+		// We won't update it for tests
+		assertAllObjectsAreTaggedWithVersion(t, helmObjects, "0.0.0-dev")
+		assertAllObjectsAreTaggedWithVersion(t, kustomizeObjects, "0.0.0-test-integration")
+
+		assertSimilarHelmAndKustomizeObjects(t, helmObjects, kustomizeObjects)
+	})
 }
